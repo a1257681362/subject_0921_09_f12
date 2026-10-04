@@ -17,7 +17,9 @@ import java.time.LocalDateTime;
 public class Asset extends BaseEntity {
     /** 素材编号，全局唯一，AS+序列 */
     private String assetNo;
-    /** 原图文件指纹（SHA-256，hex），唯一 */
+    /** 投放用途码（默认 FEED）；指纹只在同一用途内认同源，跨用途各开各档 */
+    private String purposeCode;
+    /** 原图文件指纹（SHA-256，hex）；与 purposeCode 联合唯一 */
     private String fingerprintSha256;
     /** 最近一次上传使用的文件名 */
     private String fileName;

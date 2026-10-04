@@ -22,18 +22,21 @@
 
 账号：演示账号 `demo / demo`，骨架账号 `bootstrap / bootstrap`（均为财务/系统视角，看全部客户、可审批）；F5 销售账号 `sales1 / sales1`、`sales2 / sales2`（只见名下客户），财务账号 `finance1 / finance1`；F6 巡查账号 `inspector1 / inspector1`（现场上报）、维护商账号 `vendor1 / vendor1`（回传处理结果），派单与复勘用 `demo / demo`；F8 安装师傅账号 `installer1 / installer1`（到场打卡、完工回传），安装派单匹配/改期用 `demo / demo`；F9 代理账号 `agent1 / agent1`、`agent2 / agent2`（只能查自己账单），代理建档挂协议/调比例/出结算用 `demo / demo` 或 `finance1 / finance1`；F10 合规岗账号 `compliance1 / compliance1`（维护受限行业名单、批量冻结与处置），名单维护与冻结处置也可用 `demo / demo`；F11 假期日历导入发布与顺延执行只认系统账号 `demo / demo`。
 
-## F2：素材流水与多规格转档（f2-asset-transcode-1）
+## F2 / F12：素材流水与多规格转档（f2-asset-transcode-1 → f12-asset-transcode-2）
 
-美工传一张原图，横竖两版常规规格自动出，不用再手工导七八个版本。
+美工传一张原图，多规格转换器按横版/竖版 × 投放渠道自动出齐，不用再手工导七八个版本；转档任务做成可管理的生产环节：部分成功逐规格可见、同源素材跨用途不误合并、任务明细可回看、旧版本按版下载。
 
 业务口径：
 
-- **素材档案按文件指纹认人**：原图算 SHA-256 指纹，`fingerprint_sha256` 唯一；同一张图重复上传（哪怕改了文件名）只累加 `upload_count`，**不另开档、不重跑转档**。
-- **横竖两版常规规格自动出**：横版 `16:9`、竖版 `9:16`，均居中裁切不变形，**长边压进限定像素**（默认 1280px，出标准件 1280×720 / 720×1280）。
-- **体积超标再压一轮质量**：产物先按首轮质量（0.85）出 JPEG，超过体积上限（默认 300KB）就每轮降一档质量（步长 0.15，下限 0.50），取体积最小一轮；压到下限仍超标也交差，任务不算失败。规格/长边/上限/质量档均在 `application.yml` 的 `asset.*` 配置。
-- **结果记进素材档案、标清用途**：每个产物一行，`usage` 记规格标识（信息流横版 `feed_landscape` / 信息流竖版 `feed_portrait`），并记尺寸、长边、体积、质量轮次、最终质量。
+- **素材档案按「用途 + 文件指纹」认人**：原图算 SHA-256 指纹，`(purpose_code, fingerprint_sha256)` 联合唯一。**同一张图投不同用途（如信息流 FEED / 开屏 SPLASH）各开各的档，不会误合并**；同一用途下重复上传（哪怕改了文件名）只累加 `upload_count`，**不另开档、不重跑转档**。
+- **多规格转换器按 横版/竖版 × 投放渠道 出产物**：每个规格配置 `name`（全局规格标识，落库 `usage`，产物按它分文件）、`channel`（投放渠道，如 `feed` / `moments`）、`orientation`（LANDSCAPE/PORTRAIT）、比例与长边。横版 `16:9`、竖版 `9:16` 均居中裁切不变形，**长边压进限定像素**（默认信息流 1280px、朋友圈 1080px，出标准件）。上传/重转可指定 `channel` 只出某渠道，不传则全部渠道规格齐出。
+- **体积超标再压一轮质量**：产物先按首轮质量（0.85）出 JPEG，超过体积上限（默认 300KB）就每轮降一档质量（步长 0.15，下限 0.50），取体积最小一轮；压到下限仍超标也交差，该规格不算失败。规格/渠道/长边/上限/质量档均在 `application.yml` 的 `asset.*` 配置。
+- **结果记进素材档案、标清用途**：每个产物一行，`usage` 记规格标识、`channel` 记投放渠道、`orientation` 记横竖朝向，并记尺寸、长边、体积、质量轮次、最终质量。横版/竖版 × 渠道分别落，互不覆盖。
 - **多规格转档版本**：上传首轮记 v1（来源 UPLOAD）；手动再跑不抹历史，另起一版（来源 RETRY），各版本产物独立可翻。
-- **多规格转档状态**：任务 `PENDING 待处理 / PROCESSING 转档中 / SUCCESS 成功 / FAILED 失败`，状态同时挂在版本和任务上；**失败原因落库**（如"图片格式不支持或文件已损坏"），前端轮询即可见，美工不干等；失败可一键重新转档。
+- **多规格转档状态：全成 / 部分成 / 全败各自有状态**。任务 `PENDING 待处理 / PROCESSING 处理中 / SUCCESS 全部规格成功 / PARTIAL_SUCCESS 部分规格成功 / FAILED 全部规格失败`，状态同时挂在版本和任务上；每个规格一行**任务项**（`t_transcode_job_item`），独立 `PENDING/PROCESSING/SUCCESS/FAILED` 与可读失败原因——某个规格失败不拖累其余，成的有产物可下、败的带原因可只重跑那一个（重转可传 `specs` 指定规格、或按 `channel` 重跑整渠道）。
+- **任务明细可回看**：建任务时把**输入参数快照**（来源 / 用途 / 渠道 / 选中规格 / 原图文件名尺寸 / 体积上限 / 质量档）固化成 JSON 落 `input_params`，之后配置怎么改都不影响回看；`GET /api/assets/jobs/{jobId}/detail` 一次返回任务 + 输入参数 + 产出版本 + 逐规格任务项 + 经手人。
+- **接口异常给可读原因**：解码失败、渠道/规格不存在、归属不符等都返回中文可读提示；后台失败原因落任务项与版本，前端轮询即可见，美工不干等。
+- **旧素材仍可按原版本下载**：产物按 素材/版本/规格 落盘，重转出新版不覆盖旧文件；`GET /api/assets/{id}/versions/{versionId}/files/{usage}/download` 按原版本 + 用途精确定位，始终能下到那一版，不会被新版本顶替。
 - 上传接口立即返回任务号，转档在后台线程池异步执行（事务提交后触发，避免后台读不到未提交任务）。
 - 原图与产物落盘 `asset.storage-root`（默认 `./data/assets`，原图按指纹存、产物按 素材/版本/规格 存），库里存相对路径。
 
@@ -202,11 +205,11 @@
 | 单据翻查/详情/事件留底/根单链 | `GET /api/orders`、`/api/orders/{orderNo}`、`/events`、`/chain` |
 | 外部回执 | `POST /api/receipts`、`GET /api/receipts/order/{orderNo}` |
 | 月度档期周历/点位档期流水/底账版本 | `GET /api/ledger/calendar`、`/api/ledger/sites/{siteNo}/timeline`、`/api/ledger/versions` |
-| 原图上传（指纹去重，自动转档） | `POST /api/assets/upload`（multipart：file、operatorName、remark） |
-| 素材翻查 / 详情 / 档案全量 | `GET /api/assets?keyword=&status=`、`/api/assets/{id}`、`/api/assets/{id}/detail` |
-| 当前转档规格 | `GET /api/assets/specs` |
-| 转档状态轮询 / 重新转档 | `GET /api/assets/jobs/{jobId}`、`POST /api/assets/{id}/retry` |
-| 产物下载 / 原图下载 | `GET /api/assets/files/{fileId}/download`、`/api/assets/{id}/original` |
+| 原图上传（用途+指纹去重，按渠道自动转档） | `POST /api/assets/upload`（multipart：file、operatorName、remark、purposeCode、channel） |
+| 素材翻查 / 详情 / 档案全量 | `GET /api/assets?keyword=&status=&purposeCode=`、`/api/assets/{id}`、`/api/assets/{id}/detail` |
+| 当前转档规格（横/竖 × 渠道） | `GET /api/assets/specs` |
+| 转档状态轮询 / 任务明细回看 / 重新转档 | `GET /api/assets/jobs/{jobId}`、`GET /api/assets/jobs/{jobId}/detail`、`POST /api/assets/{id}/retry?channel=&specs=` |
+| 产物下载 / 按原版本下载 / 原图下载 | `GET /api/assets/files/{fileId}/download`、`GET /api/assets/{id}/versions/{versionId}/files/{usage}/download`、`/api/assets/{id}/original` |
 | 经纬度建档 / 建档版本翻查 | `POST /api/sites/{siteNo}/geo`、`GET /api/sites/{siteNo}/geo/versions` |
 | 半径捞点 / 整页导出 CSV | `GET /api/sites/geo/search?lat=&lng=&radiusKm=`、`GET /api/sites/geo/search/export?...` |
 | 商圈圈界：圈定 / 翻查 / 重圈 | `POST /api/districts`、`GET /api/districts`、`PUT /api/districts/{districtName}` |
@@ -260,6 +263,6 @@
 1. 执行 `mvn -q -DskipTests compile` 验证骨架构建。
 2. 执行 `mvn spring-boot:run` 启动应用；Spring Boot 会自动执行 `src/main/resources/schema.sql`。
 3. H2 数据文件默认写入工作区 `data/evops`。如需修改路径，编辑 `application.yml` 中的 `jdbc:h2:file:` 连接串。
-4. 验证：`mvn test`（11 项底账口径测试 + 7 项素材转档测试 + 8 项坐标建档测试 + 13 项年度刊例计价测试 + 13 项客户授信回款测试 + 10 项异常上报整改测试 + 11 项屏体播放排片测试 + 12 项安装派单资质匹配测试 + 12 项代理协议结算测试 + 2 项受限行业名单测试 + 8 项假期日历顺延测试，独立内存 H2）。
+4. 验证：`mvn test`（11 项底账口径测试 + 13 项素材转档/渠道/部分成功/明细/旧版本下载测试 + 8 项坐标建档测试 + 13 项年度刊例计价测试 + 13 项客户授信回款测试 + 10 项异常上报整改测试 + 11 项屏体播放排片测试 + 12 项安装派单资质匹配测试 + 12 项代理协议结算测试 + 2 项受限行业名单测试 + 8 项假期日历顺延测试，共 113 项，独立内存 H2）。
 
 表结构交付副本：`docs/schema/evops.sql`（容器内根目录 `../../docs/schema` 不可写，交付副本置于工作区内），应与 `src/main/resources/schema.sql` 保持一致。

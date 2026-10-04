@@ -1027,7 +1027,9 @@ let pendingAssetId = null;
 
 function transcodeTag(s) {
   return { PENDING: '<span class="tag pending">待处理</span>', PROCESSING: '<span class="tag processing">转档中…</span>',
-    SUCCESS: '<span class="tag success">成功</span>', FAILED: '<span class="tag failed">失败</span>' }[s] || esc(s);
+    SUCCESS: '<span class="tag success">成功</span>',
+    PARTIAL_SUCCESS: '<span class="tag processing">部分成功</span>',
+    FAILED: '<span class="tag failed">失败</span>' }[s] || esc(s);
 }
 function kb(n) { return n == null ? '' : (n / 1024).toFixed(1) + ' KB'; }
 function usageLabel(code) { return SPEC_USAGE[code] ? SPEC_USAGE[code] + '（' + code + '）' : code; }
@@ -1082,6 +1084,7 @@ function pollJob(jobId, assetId) {
       }
       clearInterval(assetPollTimer); assetPollTimer = null;
       if (job.status === 'SUCCESS') toast('转档成功：' + job.successCount + ' 个规格已产出', true);
+      else if (job.status === 'PARTIAL_SUCCESS') toast('部分成功：成功 ' + job.successCount + '/' + job.targetCount + '，失败 ' + job.failCount + ' 个，可点明细查看', false);
       else toast('转档失败，原因已在档案里标出：' + (job.failReason || ''), false);
       loadAssets();
       loadAssetDetail(assetId);
@@ -1115,16 +1118,20 @@ async function loadAssetDetail(id, silent) {
       '素材档案 ' + a.assetNo + ' · ' + a.fileName + '（原图 ' + a.width + '×' + a.height + '）';
 
     document.getElementById('assetJobs').innerHTML =
-      '<table><tr><th>转档任务号</th><th>对应版本</th><th>规格</th><th>状态</th><th>产出数</th><th>失败原因</th><th>完成时刻</th><th></th></tr>'
+      '<table><tr><th>转档任务号</th><th>对应版本</th><th>规格</th><th>状态</th><th>成功/目标</th><th>失败原因</th><th>完成时刻</th><th></th></tr>'
       + d.jobs.map(j => {
           const ver = (d.versions || []).find(v => v.version.id === j.versionId);
-          const reason = j.status === 'FAILED'
+          const showReason = j.status === 'FAILED' || j.status === 'PARTIAL_SUCCESS';
+          const reason = showReason
             ? `<div class="failbox">${esc(j.failReason || '未记录原因')}</div>` : '<span class="muted">—</span>';
-          const act = j.status === 'FAILED'
-            ? `<button class="sm warn" onclick="retryAsset(${a.id})">重新转档</button>` : '';
+          const canRetry = j.status === 'FAILED' || j.status === 'PARTIAL_SUCCESS';
+          const act = (canRetry ? `<button class="sm warn" onclick="retryAsset(${a.id})">重新转档</button>` : '')
+            + `<button class="sm gray" style="margin-left:6px" onclick="toggleJobItems(${j.id})">明细</button>`;
           return `<tr><td>${esc(j.jobNo)}</td><td>v${ver ? ver.version.versionNo : ''}</td>
-            <td>${esc(j.specs)}</td><td>${transcodeTag(j.status)}</td><td>${j.successCount}</td>
-            <td>${reason}</td><td>${esc(j.finishedTime)}</td><td>${act}</td></tr>`;
+            <td>${esc(j.specs)}</td><td>${transcodeTag(j.status)}</td>
+            <td>${j.successCount}/${j.targetCount}</td>
+            <td>${reason}</td><td>${esc(j.finishedTime)}</td><td>${act}</td></tr>
+            <tr id="jobitems-${j.id}" style="display:none"><td colspan="8"><div id="jobitemsbox-${j.id}" class="muted">加载中…</div></td></tr>`;
         }).join('') + '</table>'
       + '<div class="actions"><button class="gray" onclick="retryAsset(' + a.id + ')">手动再跑一轮（另起新版本）</button>'
       + '<a href="' + API + '/assets/' + a.id + '/original" target="_blank"><button class="gray" type="button" style="margin-left:8px">下载原图</button></a></div>';
@@ -1135,12 +1142,12 @@ async function loadAssetDetail(id, silent) {
           const src = v.source === 'RETRY' ? '重新转档' : '上传首轮';
           const fail = v.transcodeStatus === 'FAILED' ? `<div class="failbox">失败原因：${esc(v.failReason || '')}</div>` : '';
           const files = (vv.files || []).length
-            ? '<table><tr><th>用途</th><th>产物尺寸</th><th>长边</th><th>体积</th><th>质量轮次</th><th>最终质量</th><th></th></tr>'
-              + vv.files.map(f => `<tr><td>${esc(usageLabel(f.usage))}</td><td>${f.width}×${f.height}</td>
+            ? '<table><tr><th>规格用途</th><th>渠道</th><th>朝向</th><th>产物尺寸</th><th>长边</th><th>体积</th><th>质量轮次</th><th>最终质量</th><th></th></tr>'
+              + vv.files.map(f => `<tr><td>${esc(usageLabel(f.usage))}</td><td>${esc(f.channel || '')}</td><td>${orientLabel(f.orientation)}</td><td>${f.width}×${f.height}</td>
                   <td>${f.longEdge}px</td><td>${kb(f.fileSize)}</td>
                   <td>${f.qualityRound === 1 ? '首轮达标' : '第 ' + f.qualityRound + ' 轮'}</td>
                   <td>${Math.round(f.finalQuality * 100)}%</td>
-                  <td><a href="${API}/assets/files/${f.id}/download"><button class="sm" type="button">下载</button></a></td></tr>`).join('')
+                  <td><a href="${API}/assets/${a.id}/versions/${v.id}/files/${encodeURIComponent(f.usage)}/download"><button class="sm" type="button">按版本下载</button></a></td></tr>`).join('')
               + '</table>'
             : '<p class="muted">本版还没有产物</p>';
           return `<div style="border:1px solid #e3e6eb;border-radius:6px;padding:10px 12px;margin-bottom:10px">
@@ -1158,6 +1165,26 @@ async function retryAsset(id) {
     pollJob(job.id, id);
   } catch (e) { toast(e.message); }
 }
+
+// 展开/收起某任务的逐规格明细（输入参数 + 各规格状态/渠道/原因）
+async function toggleJobItems(jobId) {
+  const row = document.getElementById('jobitems-' + jobId);
+  const box = document.getElementById('jobitemsbox-' + jobId);
+  if (!row || !box) return;
+  if (row.style.display === 'table-row') { row.style.display = 'none'; return; }
+  row.style.display = 'table-row';
+  try {
+    const d = await call('GET', '/assets/jobs/' + jobId + '/detail');
+    const inp = d.input ? `<div class="muted" style="margin-bottom:6px">输入参数：来源 ${esc(inp0(d.input.source))} ｜ 用途 ${esc(d.input.purposeCode)} ｜ 渠道 ${esc((d.input.channels||[]).join(','))} ｜ 规格 ${esc((d.input.specs||[]).join(','))} ｜ 经手人 ${esc(d.job.operatorName)}</div>` : '';
+    const rows = (d.items || []).map(it => {
+      const r = it.status === 'FAILED'
+        ? `<div class="failbox">${esc(it.failReason || '未记录原因')}</div>` : `<span class="muted">${it.width||''}×${it.height||''} ${kb(it.fileSize)}</span>`;
+      return `<tr><td>${esc(usageLabel(it.usage))}</td><td>${esc(it.channel)}</td><td>${orientLabel(it.orientation)}</td><td>${transcodeTag(it.status)}</td><td>${r}</td></tr>`;
+    }).join('');
+    box.innerHTML = inp + '<table style="margin:0"><tr><th>规格用途</th><th>渠道</th><th>朝向</th><th>状态</th><th>产物 / 失败原因</th></tr>' + rows + '</table>';
+  } catch (e) { box.textContent = '明细加载失败：' + e.message; }
+}
+function inp0(s){ return { UPLOAD:'上传首轮', RETRY:'重新转档' }[s] || s; }
 
 /* ===== ⑧ 坐标建档与半径捞点 ===== */
 function geoTag(s) {

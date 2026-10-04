@@ -17,6 +17,10 @@ public class AssetFile extends BaseEntity {
     private Long versionId;
     /** 规格标识，如 feed_landscape / feed_portrait */
     private String usage;
+    /** 投放渠道，如 feed / wechat_moments */
+    private String channel;
+    /** 横竖朝向：LANDSCAPE 横版 / PORTRAIT 竖版 */
+    private String orientation;
     private Integer width;
     private Integer height;
     /** 长边限定像素 */
