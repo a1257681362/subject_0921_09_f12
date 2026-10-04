@@ -38,9 +38,9 @@ public class AssetStorage {
         return relative;
     }
 
-    /** 规格产物：素材/版本/规格 三级路径，重跑覆盖旧文件。 */
-    public String storeProduct(Long assetId, int versionNo, String specName, byte[] data) {
-        String relative = "products/" + assetId + "/v" + versionNo + "/" + specName + ".jpg";
+    /** 规格产物：素材/版本/渠道/规格 四级路径，重跑另起版本目录，旧版本产物始终可下载。 */
+    public String storeProduct(Long assetId, int versionNo, String channel, String specName, byte[] data) {
+        String relative = "products/" + assetId + "/v" + versionNo + "/" + channel + "/" + specName + ".jpg";
         write(relative, data);
         return relative;
     }

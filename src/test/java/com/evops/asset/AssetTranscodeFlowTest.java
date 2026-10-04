@@ -78,20 +78,20 @@ class AssetTranscodeFlowTest {
     @Test
     void 同一张图重复上传按指纹认出_不另开档_不重跑转档() throws Exception {
         byte[] bytes = png(noise(1600, 1200, 1));
-        UploadResult first = assetService.upload(pngFile("banner-a.png", bytes), "tester", null);
+        UploadResult first = assetService.upload(pngFile("banner-a.png", bytes), null, "tester", null);
         assertFalse(first.isDeduped());
         awaitTerminal(first.getJob().getId());
         Long assetId = first.getAsset().getId();
 
         // 同一份内容换个文件名再传：指纹一致
-        UploadResult again = assetService.upload(pngFile("banner-b-改名.png", bytes), "tester", null);
+        UploadResult again = assetService.upload(pngFile("banner-b-改名.png", bytes), null, "tester", null);
         assertTrue(again.isDeduped());
         assertEquals(assetId, again.getAsset().getId());
 
         Asset reloaded = assetService.requireById(assetId);
         assertEquals(2, reloaded.getUploadCount());
         // 全库按这个编号只有一份档案
-        List<Asset> rows = assetService.search(reloaded.getAssetNo(), null);
+        List<Asset> rows = assetService.search(reloaded.getAssetNo(), null, null);
         assertEquals(1, rows.size());
         // 重复上传没有另起转档版本
         assertEquals(1, assetService.listVersions(assetId).size());
@@ -101,7 +101,7 @@ class AssetTranscodeFlowTest {
     void 横竖两版常规规格自动出_长边压进限定像素() throws Exception {
         // 超宽原图：两版都要自动产出，横版 1280x720，竖版 720x1280，长边都不超 1280
         byte[] bytes = png(noise(2000, 1000, 2));
-        UploadResult result = assetService.upload(pngFile("wide.png", bytes), "tester", null);
+        UploadResult result = assetService.upload(pngFile("wide.png", bytes), null, "tester", null);
         TranscodeJob job = awaitTerminal(result.getJob().getId());
 
         assertEquals(AssetEnums.JOB_SUCCESS, job.getStatus());
@@ -131,7 +131,7 @@ class AssetTranscodeFlowTest {
     @Test
     void 常规规格出固定标准尺寸_小图也补齐为规格尺寸() throws Exception {
         byte[] bytes = png(noise(640, 360, 3));
-        UploadResult result = assetService.upload(pngFile("small.png", bytes), "tester", null);
+        UploadResult result = assetService.upload(pngFile("small.png", bytes), null, "tester", null);
         TranscodeJob job = awaitTerminal(result.getJob().getId());
         assertEquals(AssetEnums.JOB_SUCCESS, job.getStatus());
         Map<String, AssetFile> files = assetService.listFiles(job.getVersionId()).stream()
@@ -154,7 +154,7 @@ class AssetTranscodeFlowTest {
         properties.setMaxFileSize(org.springframework.util.unit.DataSize.ofBytes(1));
         try {
             byte[] bytes = png(noise(1280, 720, 42));
-            UploadResult result = assetService.upload(pngFile("noisy.png", bytes), "tester", null);
+            UploadResult result = assetService.upload(pngFile("noisy.png", bytes), null, "tester", null);
             TranscodeJob job = awaitTerminal(result.getJob().getId());
             // 压到下限仍超标不算任务失败：按体积最小一轮交差，任务整体成功
             assertEquals(AssetEnums.JOB_SUCCESS, job.getStatus());
@@ -175,14 +175,14 @@ class AssetTranscodeFlowTest {
         byte[] junk = "这压根不是图片".getBytes();
         MockMultipartFile bad = new MockMultipartFile("file", "bad.jpg", "image/jpeg", junk);
         BusinessException ex = assertThrows(BusinessException.class,
-                () -> assetService.upload(bad, "tester", null));
+                () -> assetService.upload(bad, null, "tester", null));
         assertTrue(ex.getMessage().contains("格式不支持") || ex.getMessage().contains("损坏"));
     }
 
     @Test
     void 后台转档失败原因落库可见_重新转档另起版本不抹失败历史() throws Exception {
         byte[] bytes = png(noise(1600, 900, 7));
-        UploadResult result = assetService.upload(pngFile("ok.png", bytes), "tester", null);
+        UploadResult result = assetService.upload(pngFile("ok.png", bytes), null, "tester", null);
         awaitTerminal(result.getJob().getId());
         Asset asset = result.getAsset();
 

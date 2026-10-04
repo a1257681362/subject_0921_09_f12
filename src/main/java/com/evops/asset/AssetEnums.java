@@ -17,9 +17,15 @@ public final class AssetEnums {
     public static final String SOURCE_UPLOAD = "UPLOAD";
     public static final String SOURCE_RETRY = "RETRY";
 
-    /** 多规格转档状态：待处理 / 处理中 / 成功 / 失败（失败原因必须落库可见） */
+    /** 多规格转档状态：待处理 / 处理中 / 成功 / 部分成功 / 失败（失败与部分成功的原因都必须落库可见） */
     public static final String JOB_PENDING = "PENDING";
     public static final String JOB_PROCESSING = "PROCESSING";
     public static final String JOB_SUCCESS = "SUCCESS";
+    public static final String JOB_PARTIAL = "PARTIAL";
     public static final String JOB_FAILED = "FAILED";
+
+    /** 质量压缩状态：首轮达标 / 降质压缩后达标 / 压到质量下限仍超体积上限（按体积最小一轮交差） */
+    public static final String QS_DIRECT = "DIRECT";
+    public static final String QS_COMPRESSED = "COMPRESSED";
+    public static final String QS_OVER_LIMIT = "OVER_LIMIT";
 }

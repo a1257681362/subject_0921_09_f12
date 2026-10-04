@@ -98,7 +98,7 @@ class PlaylistFlowTest {
             ImageIO.write(img, "png", bos);
             MockMultipartFile file = new MockMultipartFile(
                     "file", uniqueNo(name) + ".png", "image/png", bos.toByteArray());
-            return assetService.upload(file, "tester", null).getAsset();
+            return assetService.upload(file, null, "tester", null).getAsset();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

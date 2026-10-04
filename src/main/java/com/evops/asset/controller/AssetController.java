@@ -1,15 +1,18 @@
 package com.evops.asset.controller;
 
 import com.evops.asset.dto.AssetDetailView;
+import com.evops.asset.dto.JobDetailView;
 import com.evops.asset.dto.SpecsView;
 import com.evops.asset.dto.UploadResult;
 import com.evops.asset.entity.Asset;
 import com.evops.asset.entity.AssetFile;
+import com.evops.asset.entity.AssetVersion;
 import com.evops.asset.entity.TranscodeJob;
 import com.evops.asset.service.AssetService;
 import com.evops.asset.service.TranscodeService;
 import com.evops.asset.support.AssetProperties;
 import com.evops.common.ApiResponse;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -27,7 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-/** 素材流水与多规格转档：上传建档（指纹去重）、翻查、档案详情、产物下载、状态轮询、重新转档。 */
+/** 素材流水与多规格转档：上传建档（指纹+用途去重）、翻查、档案详情、任务明细回看、产物下载、状态轮询、重新转档。 */
 @RestController
 @RequestMapping("/api/assets")
 public class AssetController {
@@ -35,6 +38,7 @@ public class AssetController {
     private final AssetService assetService;
     private final TranscodeService transcodeService;
     private final AssetProperties properties;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AssetController(AssetService assetService, TranscodeService transcodeService,
                            AssetProperties properties) {
@@ -43,19 +47,21 @@ public class AssetController {
         this.properties = properties;
     }
 
-    /** 原图上传：同指纹不另开档；新图自动出横竖两版常规规格。 */
+    /** 原图上传：同指纹同用途不另开档；新图按用途所属渠道自动出横竖两版常规规格。 */
     @PostMapping("/upload")
     public ApiResponse<UploadResult> upload(@RequestParam("file") MultipartFile file,
+                                            @RequestParam(value = "purpose", required = false) String purpose,
                                             @RequestParam(value = "operatorName", required = false) String operatorName,
                                             @RequestParam(value = "remark", required = false) String remark) {
-        return ApiResponse.ok(assetService.upload(file, operatorName, remark));
+        return ApiResponse.ok(assetService.upload(file, purpose, operatorName, remark));
     }
 
-    /** 翻查：keyword 同时匹配文件名 / 素材编号。 */
+    /** 翻查：keyword 同时匹配文件名 / 素材编号；purpose 按投放用途过滤。 */
     @GetMapping
     public ApiResponse<List<Asset>> search(@RequestParam(required = false) String keyword,
-                                           @RequestParam(required = false) String status) {
-        return ApiResponse.ok(assetService.search(keyword, status));
+                                           @RequestParam(required = false) String status,
+                                           @RequestParam(required = false) String purpose) {
+        return ApiResponse.ok(assetService.search(keyword, status, purpose));
     }
 
     @GetMapping("/{id}")
@@ -81,15 +87,32 @@ public class AssetController {
         return ApiResponse.ok(view);
     }
 
-    /** 当前生效的常规规格（用途 / 比例 / 长边 / 体积上限），供前端标清用途。 */
+    /** 当前生效的投放渠道与常规规格（用途 / 横竖 / 比例 / 长边 / 体积上限），供前端标清用途。 */
     @GetMapping("/specs")
     public ApiResponse<SpecsView> specs() {
         SpecsView view = new SpecsView();
+        List<SpecsView.ChannelItem> channels = new ArrayList<>();
+        for (AssetProperties.Channel channel : properties.getChannels()) {
+            SpecsView.ChannelItem item = new SpecsView.ChannelItem();
+            item.setCode(channel.getCode());
+            item.setName(channel.getName());
+            channels.add(item);
+        }
+        view.setChannels(channels);
+        view.setDefaultPurpose(properties.defaultPurpose());
         List<SpecsView.SpecItem> items = new ArrayList<>();
         for (AssetProperties.Spec spec : properties.getSpecs()) {
             SpecsView.SpecItem item = new SpecsView.SpecItem();
             item.setName(spec.getName());
             item.setUsage(spec.getUsage());
+            String channel = spec.getChannel() == null || spec.getChannel().trim().isEmpty()
+                    ? properties.defaultPurpose() : spec.getChannel();
+            item.setChannel(channel);
+            try {
+                item.setOrientation(spec.orientation());
+            } catch (Exception e) {
+                item.setOrientation("UNKNOWN");
+            }
             item.setRatio(spec.getRatio());
             item.setLongEdge(spec.getLongEdge());
             items.add(item);
@@ -103,20 +126,35 @@ public class AssetController {
         return ApiResponse.ok(view);
     }
 
-    /** 转档任务状态轮询：PENDING / PROCESSING / SUCCESS / FAILED，FAILED 带原因。 */
+    /** 转档任务状态轮询：PENDING / PROCESSING / SUCCESS / PARTIAL / FAILED，失败与部分成功带原因。 */
     @GetMapping("/jobs/{jobId}")
     public ApiResponse<TranscodeJob> jobStatus(@PathVariable Long jobId) {
         return ApiResponse.ok(transcodeService.requireJob(jobId));
     }
 
-    /** 失败或想重跑：不抹历史，另起一版重新转档。 */
+    /** 任务明细回看：逐规格状态与输入参数、产出版本与产物、操作人、提交时冻结的参数快照。 */
+    @GetMapping("/jobs/{jobId}/detail")
+    public ApiResponse<JobDetailView> jobDetail(@PathVariable Long jobId) {
+        TranscodeJob job = transcodeService.requireJob(jobId);
+        JobDetailView view = new JobDetailView();
+        view.setJob(job);
+        view.setItems(transcodeService.listItems(jobId));
+        AssetVersion version = assetService.listVersions(job.getAssetId()).stream()
+                .filter(v -> v.getId().equals(job.getVersionId())).findFirst().orElse(null);
+        view.setVersion(version);
+        view.setFiles(version == null ? new ArrayList<>() : assetService.listFiles(version.getId()));
+        view.setInputParams(parseSnapshot(job.getSpecsSnapshot()));
+        return ApiResponse.ok(view);
+    }
+
+    /** 失败或想重跑：不抹历史，另起一版重新转档（挂失败重试链）。 */
     @PostMapping("/{id}/retry")
     public ApiResponse<TranscodeJob> retry(@PathVariable Long id,
                                            @RequestParam(required = false) String operatorName) {
         return ApiResponse.ok(assetService.retry(id, operatorName));
     }
 
-    /** 下载某个多规格产物。 */
+    /** 下载某个多规格产物（任何历史版本的产物都可按原版本下载）。 */
     @GetMapping("/files/{fileId}/download")
     public ResponseEntity<ByteArrayResource> downloadFile(@PathVariable Long fileId) {
         AssetFile file = assetService.requireProductFile(fileId);
@@ -148,6 +186,18 @@ public class AssetController {
                 .contentType(mediaType)
                 .contentLength(data.length)
                 .body(new ByteArrayResource(data));
+    }
+
+    /** 快照 JSON 解析成对象供前端直接渲染；老任务没有快照或快照损坏时原样给原文。 */
+    private Object parseSnapshot(String snapshot) {
+        if (snapshot == null || snapshot.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(snapshot, Object.class);
+        } catch (Exception e) {
+            return snapshot;
+        }
     }
 
     private String contentDisposition(String filename) {

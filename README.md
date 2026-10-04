@@ -191,6 +191,21 @@
 
 假期日历模块：假期日历（年份唯一、当前生效版本指针）+ 日历日期（休息日/调休上班日随版本冻结）；假期日历版本（按年导入即草稿、发布生效旧版取代，版本链即操作记录）；假期日历状态（主档 `DRAFT 编制中 / EFFECTIVE 生效中`，版本 `DRAFT / EFFECTIVE / SUPERSEDED`；顺延记录 `SHIFTED 已顺延 / FAILED 顺延失败`）。
 
+## F12：转档任务生产化管理（f12-transcode-pipeline-1）
+
+素材量一上来，"传了图等结果"就不够用了——转档要当成生产环节管：素材按投放用途分档，同一张图投信息流和投开屏是两份档案各出各的规格；每个任务按渠道出横竖两版，哪个规格成了、哪个败了、压了几轮质量，逐行有状态可回看。
+
+业务口径：
+
+- **素材按 文件指纹+投放用途 建档**：文件指纹（SHA-256）仍用来认同源——同一张图同一用途重复上传只累加 `upload_count`，不另开档、不重跑转档；但**同一来源图投不同用途各开各的档，不误合并**（用途即投放渠道，在 `asset.channels` 配置，缺省取第一个渠道，填了不支持的用途当场拒收并列出可选项）。同源不同用途的档案共享同一份原图文件，档案各自独立。
+- **多规格转换器按渠道出横竖两版**：转档规格挂在投放渠道下（`asset.specs` 的 `channel`），每个渠道横版、竖版各一档（如信息流 `feed_landscape` 16:9 / `feed_portrait` 9:16，开屏 `splash_landscape` / `splash_portrait` 长边 1920）；上传选了用途，就只跑该渠道的规格。产物按 素材/版本/渠道/规格 落盘，渠道与横竖朝向随产物落库。
+- **质量压缩、失败重试、部分成功各自有状态**：任务状态 `PENDING 待处理 / PROCESSING 转档中 / SUCCESS 成功 / PARTIAL 部分成功 / FAILED 失败`——每个规格独立成败，单个规格失败不拖垮整单：全成 `SUCCESS`、成败各半 `PARTIAL`、全败 `FAILED`。逐规格明细（`t_transcode_job_item`）一记一行：质量压缩状态 `DIRECT 首轮达标 / COMPRESSED 降质压缩后达标 / OVER_LIMIT 压到下限仍超标（按体积最小一轮交差）`、质量轮次、最终质量、失败原因各自落库。失败重试另起版本（来源 RETRY）与新任务，任务挂 `retry_of_job_id` 形成重试链，历史不抹。
+- **任务明细可回看**：每个任务落输入参数快照（用途、各规格比例/长边、体积上限、质量档，提交时冻结的 JSON），执行就按明细落库的参数跑，回看与执行同一份口径；`GET /api/assets/jobs/{jobId}/detail` 一屏看全：逐规格状态与输入参数、产出版本与产物清单、操作人、重试来源。
+- **接口异常给出可读原因**：不支持的用途、损坏的图片、非法的规格配置、超体积上限的 multipart，都返回能直接给美工看的中文原因；后台转档失败原因随任务与明细落库，前端轮询即可见。
+- **旧素材仍可按原版本下载**：重新转档只追加新版本，旧版本产物行与落盘文件都保留，`/api/assets/files/{fileId}/download` 对任何历史版本的产物都可下载；最新版本指针只指到有产出的版本（成功或部分成功）。
+
+转档生产化模块：素材档案（指纹+用途分档）；转档任务（状态、输入参数快照、规格总数、重试链）；转档任务明细（逐规格输入参数、质量压缩状态、失败原因）；多规格产物（渠道、横竖朝向、质量状态随档）。
+
 ## 接口一览（均在 /api 下，除 health/login 外需登录）
 
 | 动作 | 接口 |
@@ -202,11 +217,11 @@
 | 单据翻查/详情/事件留底/根单链 | `GET /api/orders`、`/api/orders/{orderNo}`、`/events`、`/chain` |
 | 外部回执 | `POST /api/receipts`、`GET /api/receipts/order/{orderNo}` |
 | 月度档期周历/点位档期流水/底账版本 | `GET /api/ledger/calendar`、`/api/ledger/sites/{siteNo}/timeline`、`/api/ledger/versions` |
-| 原图上传（指纹去重，自动转档） | `POST /api/assets/upload`（multipart：file、operatorName、remark） |
-| 素材翻查 / 详情 / 档案全量 | `GET /api/assets?keyword=&status=`、`/api/assets/{id}`、`/api/assets/{id}/detail` |
-| 当前转档规格 | `GET /api/assets/specs` |
-| 转档状态轮询 / 重新转档 | `GET /api/assets/jobs/{jobId}`、`POST /api/assets/{id}/retry` |
-| 产物下载 / 原图下载 | `GET /api/assets/files/{fileId}/download`、`/api/assets/{id}/original` |
+| 原图上传（指纹+用途去重，按渠道自动转档） | `POST /api/assets/upload`（multipart：file、purpose、operatorName、remark） |
+| 素材翻查 / 详情 / 档案全量 | `GET /api/assets?keyword=&status=&purpose=`、`/api/assets/{id}`、`/api/assets/{id}/detail` |
+| 当前投放渠道与转档规格 | `GET /api/assets/specs` |
+| 转档状态轮询 / 任务明细回看 / 重新转档 | `GET /api/assets/jobs/{jobId}`、`GET /api/assets/jobs/{jobId}/detail`、`POST /api/assets/{id}/retry` |
+| 产物下载（含历史版本）/ 原图下载 | `GET /api/assets/files/{fileId}/download`、`/api/assets/{id}/original` |
 | 经纬度建档 / 建档版本翻查 | `POST /api/sites/{siteNo}/geo`、`GET /api/sites/{siteNo}/geo/versions` |
 | 半径捞点 / 整页导出 CSV | `GET /api/sites/geo/search?lat=&lng=&radiusKm=`、`GET /api/sites/geo/search/export?...` |
 | 商圈圈界：圈定 / 翻查 / 重圈 | `POST /api/districts`、`GET /api/districts`、`PUT /api/districts/{districtName}` |
@@ -260,6 +275,6 @@
 1. 执行 `mvn -q -DskipTests compile` 验证骨架构建。
 2. 执行 `mvn spring-boot:run` 启动应用；Spring Boot 会自动执行 `src/main/resources/schema.sql`。
 3. H2 数据文件默认写入工作区 `data/evops`。如需修改路径，编辑 `application.yml` 中的 `jdbc:h2:file:` 连接串。
-4. 验证：`mvn test`（11 项底账口径测试 + 7 项素材转档测试 + 8 项坐标建档测试 + 13 项年度刊例计价测试 + 13 项客户授信回款测试 + 10 项异常上报整改测试 + 11 项屏体播放排片测试 + 12 项安装派单资质匹配测试 + 12 项代理协议结算测试 + 2 项受限行业名单测试 + 8 项假期日历顺延测试，独立内存 H2）。
+4. 验证：`mvn test`（11 项底账口径测试 + 7 项素材转档测试 + 9 项转档生产化测试 + 8 项坐标建档测试 + 13 项年度刊例计价测试 + 13 项客户授信回款测试 + 10 项异常上报整改测试 + 11 项屏体播放排片测试 + 12 项安装派单资质匹配测试 + 12 项代理协议结算测试 + 2 项受限行业名单测试 + 8 项假期日历顺延测试，独立内存 H2）。
 
 表结构交付副本：`docs/schema/evops.sql`（容器内根目录 `../../docs/schema` 不可写，交付副本置于工作区内），应与 `src/main/resources/schema.sql` 保持一致。

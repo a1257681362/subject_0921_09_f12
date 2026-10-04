@@ -11,6 +11,7 @@ import com.evops.asset.entity.TranscodeJob;
 import com.evops.asset.mapper.AssetFileMapper;
 import com.evops.asset.mapper.AssetMapper;
 import com.evops.asset.mapper.AssetVersionMapper;
+import com.evops.asset.support.AssetProperties;
 import com.evops.asset.support.AssetStorage;
 import com.evops.asset.support.ImageFingerprints;
 import com.evops.asset.support.ImageTranscoder;
@@ -32,7 +33,8 @@ import java.util.List;
 
 /**
  * 素材流水入口：
- * 原图上传 → 解码验尺寸 → 按文件指纹建档（同图重传只累加次数，不另开档）→ 挂首轮转档版本与任务 → 提交后后台转档。
+ * 原图上传 → 解码验尺寸 → 按 文件指纹+投放用途 建档（同图同用途重传只累加次数；同图不同用途各开各的档）
+ * → 挂首轮转档版本与任务（含逐规格明细）→ 提交后后台转档。
  */
 @Service
 public class AssetService {
@@ -47,11 +49,12 @@ public class AssetService {
     private final ImageTranscoder transcoder;
     private final TranscodeService transcodeService;
     private final TranscodeAsyncRunner asyncRunner;
+    private final AssetProperties properties;
 
     public AssetService(AssetMapper assetMapper, AssetVersionMapper versionMapper,
                         AssetFileMapper fileMapper, AssetStorage storage,
                         ImageTranscoder transcoder, TranscodeService transcodeService,
-                        TranscodeAsyncRunner asyncRunner) {
+                        TranscodeAsyncRunner asyncRunner, AssetProperties properties) {
         this.assetMapper = assetMapper;
         this.versionMapper = versionMapper;
         this.fileMapper = fileMapper;
@@ -59,22 +62,28 @@ public class AssetService {
         this.transcoder = transcoder;
         this.transcodeService = transcodeService;
         this.asyncRunner = asyncRunner;
+        this.properties = properties;
     }
 
-    /** 上传原图：同指纹已存在则不另开档（只记一次重复上传），否则建档案并自动发起横竖两版转档。 */
+    /**
+     * 上传原图：文件指纹认同源，但 指纹+投放用途 才是一份档案——
+     * 同图同用途重传只累加次数、不重跑转档；同图不同用途各开各的档，互不合并。
+     */
     @Transactional(rollbackFor = Exception.class)
-    public UploadResult upload(MultipartFile file, String operatorName, String remark) {
+    public UploadResult upload(MultipartFile file, String purpose, String operatorName, String remark) {
         if (file == null || file.isEmpty()) {
             throw new BusinessException("没有收到图片文件，请选择原图后再上传");
         }
         String operator = Operators.resolve(operatorName);
+        String resolvedPurpose = resolvePurpose(purpose);
         byte[] bytes = readBytes(file);
         String fingerprint = ImageFingerprints.sha256(bytes);
 
         Asset existing = assetMapper.selectOne(new LambdaQueryWrapper<Asset>()
-                .eq(Asset::getFingerprintSha256, fingerprint));
+                .eq(Asset::getFingerprintSha256, fingerprint)
+                .eq(Asset::getPurpose, resolvedPurpose));
         if (existing != null) {
-            // 同一张图重复上传：按指纹认出来，不另开档、不重跑转档
+            // 同一张图同一用途重复上传：按指纹认出来，不另开档、不重跑转档
             assetMapper.update(null, new LambdaUpdateWrapper<Asset>()
                     .eq(Asset::getId, existing.getId())
                     .setSql("upload_count = upload_count + 1")
@@ -82,17 +91,19 @@ public class AssetService {
                     .set(Asset::getContentType, file.getContentType())
                     .set(Asset::getLastUploadTime, LocalDateTime.now()));
             existing.setUploadCount(existing.getUploadCount() + 1);
-            return UploadResult.deduped(existing);
+            return UploadResult.deduped(existing, properties.channelName(resolvedPurpose));
         }
 
-        // 新图：先同步解码验尺寸，读不出来当场告诉美工原因，不建空档案
+        // 新图（或同源图的新用途）：先同步解码验尺寸，读不出来当场告诉美工原因，不建空档案
         SourceImage source = transcoder.decode(bytes);
         String ext = resolveExt(file);
+        // 原图按指纹落一份：同源不同用途的档案共享同一份原图文件，但档案各自独立
         String storagePath = storage.storeOriginal(fingerprint, ext, bytes);
 
         Asset asset = new Asset();
         asset.setAssetNo(String.format("AS%010d", assetMapper.nextAssetSeq()));
         asset.setFingerprintSha256(fingerprint);
+        asset.setPurpose(resolvedPurpose);
         asset.setFileName(file.getOriginalFilename());
         asset.setContentType(file.getContentType());
         asset.setWidth(source.width);
@@ -110,19 +121,20 @@ public class AssetService {
         } catch (DuplicateKeyException e) {
             // 并发重复上传兜底：唯一约束拦下后按已存在处理，不另开档
             Asset raced = assetMapper.selectOne(new LambdaQueryWrapper<Asset>()
-                    .eq(Asset::getFingerprintSha256, fingerprint));
+                    .eq(Asset::getFingerprintSha256, fingerprint)
+                    .eq(Asset::getPurpose, resolvedPurpose));
             if (raced != null) {
-                return UploadResult.deduped(raced);
+                return UploadResult.deduped(raced, properties.channelName(resolvedPurpose));
             }
             throw e;
         }
 
-        TranscodeJob job = transcodeService.startJob(asset, 1, AssetEnums.SOURCE_UPLOAD, operator);
+        TranscodeJob job = transcodeService.startJob(asset, 1, AssetEnums.SOURCE_UPLOAD, operator, null);
         runAfterCommit(job.getId());
-        return UploadResult.created(asset, job);
+        return UploadResult.created(asset, job, properties.channelName(resolvedPurpose));
     }
 
-    /** 重新转档：不抹历史，另起一个转档版本（RETRY）和新任务。 */
+    /** 重新转档：不抹历史，另起一个转档版本（RETRY）和新任务，并挂到失败重试链上。 */
     @Transactional(rollbackFor = Exception.class)
     public TranscodeJob retry(Long assetId, String operatorName) {
         Asset asset = requireById(assetId);
@@ -130,7 +142,9 @@ public class AssetService {
         Long versions = versionMapper.selectCount(new LambdaQueryWrapper<AssetVersion>()
                 .eq(AssetVersion::getAssetId, assetId));
         int nextVersionNo = (versions == null ? 0 : versions.intValue()) + 1;
-        TranscodeJob job = transcodeService.startJob(asset, nextVersionNo, AssetEnums.SOURCE_RETRY, operator);
+        TranscodeJob lastJob = transcodeService.latestJob(assetId);
+        TranscodeJob job = transcodeService.startJob(asset, nextVersionNo, AssetEnums.SOURCE_RETRY,
+                operator, lastJob == null ? null : lastJob.getId());
         runAfterCommit(job.getId());
         return job;
     }
@@ -152,8 +166,8 @@ public class AssetService {
         return asset;
     }
 
-    /** 翻查：文件名 / 编号模糊、按状态过滤；空条件全量，新档案在前。 */
-    public List<Asset> search(String keyword, String status) {
+    /** 翻查：文件名 / 编号模糊、按状态与投放用途过滤；空条件全量，新档案在前。 */
+    public List<Asset> search(String keyword, String status, String purpose) {
         LambdaQueryWrapper<Asset> wrapper = new LambdaQueryWrapper<>();
         if (keyword != null && !keyword.trim().isEmpty()) {
             String kw = keyword.trim();
@@ -161,6 +175,9 @@ public class AssetService {
         }
         if (status != null && !status.trim().isEmpty()) {
             wrapper.eq(Asset::getStatus, status.trim());
+        }
+        if (purpose != null && !purpose.trim().isEmpty()) {
+            wrapper.eq(Asset::getPurpose, purpose.trim());
         }
         wrapper.orderByDesc(Asset::getId);
         return assetMapper.selectList(wrapper);
@@ -197,6 +214,23 @@ public class AssetService {
 
     public byte[] readOriginal(Asset asset) {
         return storage.read(asset.getStoragePath());
+    }
+
+    /** 投放用途口径：缺省取配置的第一个渠道；填了就必须是配置里的渠道，否则给可读原因。 */
+    private String resolvePurpose(String purpose) {
+        if (purpose == null || purpose.trim().isEmpty()) {
+            String fallback = properties.defaultPurpose();
+            if (fallback == null) {
+                throw new BusinessException("系统还没有配置投放渠道（asset.channels），请联系管理员配置后再上传");
+            }
+            return fallback;
+        }
+        String code = purpose.trim();
+        if (!properties.hasChannel(code)) {
+            throw new BusinessException("投放用途不支持: " + code
+                    + "，当前支持的用途: " + properties.channelOptionsText());
+        }
+        return code;
     }
 
     /** 等当前事务提交后再让后台线程跑，避免线程先于 INSERT 提交读到“任务不存在”。 */
